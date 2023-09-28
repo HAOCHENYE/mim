@@ -72,26 +72,3 @@ REGISTRY_TYPE = {
     'inferencer': 'INFERENCERS',
     'function': 'FUNCTIONS',
 }
-
-# module package names transfer to github's repo names
-MODULE2GitPACKAGE = {
-    # 'mmcls': 'mmcls',
-    'mmdet': 'mmdetection',
-    'mmdet3d': 'mmdetection3d',
-    'mmseg': 'mmsegmentation',
-    'mmaction': 'mmaction2',
-    'mmtrack': 'mmtracking',
-    'mmpose': 'mmpose',
-    'mmedit': 'mmedit',
-    'mmocr': 'mmocr',
-    'mmgen': 'mmgeneration',
-    'mmfewshot': 'mmfewshot',
-    'mmrazor': 'mmrazor',
-    'mmflow': 'mmflow',
-    'mmhuman3d': 'mmhuman3d',
-    'mmrotate': 'mmrotate',
-    'mmselfsup': 'mmselfsup',
-    'mmyolo': 'mmyolo',
-    'mmpretrain': 'mmpretrain',
-    'mmagic': 'mmagic',
-}

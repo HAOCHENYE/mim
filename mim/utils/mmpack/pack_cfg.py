@@ -6,19 +6,19 @@ import os.path as osp
 import shutil
 import signal
 import sys
-import time
 import traceback
 from datetime import datetime
 from typing import Optional, Union
 
-import requests
 from mmengine import mkdir_or_exist
+from mmengine.config.utils import MODULE2PACKAGE
 from mmengine.config import Config, ConfigDict
 from mmengine.hub import get_config
 from mmengine.registry import init_default_scope
 from mmengine.runner import Runner
+from importlib.util import find_spec
 
-from .common import MODULE2GitPACKAGE, __init__str, _import_pack_str
+from .common import __init__str, _import_pack_str
 from .utils import *  # noqa: F401,F403
 from .utils import (
     _get_all_files,
@@ -51,33 +51,8 @@ def pack_tools(tool_name: str,
     if os.path.exists(path):
         os.remove(path)
 
-    web_pth = f'https://raw.githubusercontent.com/open-mmlab/' \
-        f'{MODULE2GitPACKAGE[scope]}/main/tools/{tool_name}'
-
-    max_attempts = 5
-    timeout_seconds = 60
-    attempts = 0
-
-    while attempts < max_attempts:
-        try:
-            response = requests.get(web_pth, timeout=timeout_seconds)
-            response.raise_for_status()  # 检查响应状态
-            with open(path, 'wb') as file:
-                file.write(response.content)
-            print(f"[\033[92m Pass \033[0m] Download '{path}' successful!")
-            break
-        except requests.exceptions.RequestException as e:
-            print(f'Download attempt {attempts + 1} failed: {str(e)}')
-            attempts += 1
-            if attempts < max_attempts:
-                print('Retrying in 5 seconds...')
-                time.sleep(5)
-            else:
-                print(f'[\033[91m ERROR \033[0m] Get tool failed. Please'
-                      f"download manually from '{web_pth}' and put it into"
-                      f" '\033[1m{path}\033[0m'.")
-                sys.exit(0)
-
+    path = osp.join(
+        osp.dirname(find_spec(scope).origin), '.mim', , 'tools', tool_name)
     # automatically import the pack modules
     if auto_import:
         with open(path, 'r+') as f:

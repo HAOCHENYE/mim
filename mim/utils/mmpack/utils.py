@@ -22,6 +22,7 @@ from mmengine.model import (
 from mmengine.registry import Registry
 from yapf.yapflib.yapf_api import FormatCode
 
+from mim.utils import OFFICIAL_MODULES
 from .common import BUILDER_TRANS, REGISTRY_TYPE
 from .flatten_func import *  # noqa: F403, F401
 from .flatten_func import (
@@ -81,9 +82,9 @@ def _transfer_to_export_import(file_path: str):
     """
     from mmengine import Registry
 
-    # module_path_dict is a class attribute,
+    # _module_path_dict is a class attribute,
     # already record all the exported module and their path before
-    module_path_dict = Registry.module_path_dict
+    _module_path_dict = Registry._module_path_dict
 
     with open(file_path, encoding='utf-8') as f:
         ast_tree = ast.parse(f.read())
@@ -113,13 +114,13 @@ def _transfer_to_export_import(file_path: str):
         needed_change_alias = []
 
         for alias in node.names:
-            if alias.name in module_path_dict.keys(
+            if alias.name in _module_path_dict.keys(
             ) and alias.name not in can_not_change_module:
 
                 if export_module_path is None:
-                    export_module_path = module_path_dict[alias.name]
+                    export_module_path = _module_path_dict[alias.name]
                 else:
-                    assert module_path_dict[alias.name] == export_module_path,\
+                    assert _module_path_dict[alias.name] == export_module_path,\
                         'There are two module from the same downstream repo,'\
                         " but can't change to the same export path."
 
@@ -287,10 +288,10 @@ def _wrapper_all_registries_build_func(export_module_dir: str, scope: str):
         f.write(format_code(ast.unparse(ast_tree)))
 
     # prevent circular registration
-    Registry.extra_nodule_set = set()
+    Registry._extra_module_set = set()
 
     # record the exported module for postprocessing the importfrom path
-    Registry.module_path_dict = {}
+    Registry._module_path_dict = {}
 
     # prevent circular wrapper
     if Registry.build.__name__ == 'wrapper':
@@ -339,42 +340,35 @@ def _export_module(self, obj_cls: type, pack_module_dir, obj_type: str):
 
     # local origin module
     module = obj_cls.__module__
-    parent, module_child_path = module.split('.', 1)
+    parent = module.split('.')[0]
+    new_module = module.replace(parent, 'pack')
 
-    # prevent useless export
-    if 'mm' in module.split(
-            '.')[0] and parent != 'mmengine' and parent != 'mmcv':
+    # Not necessary to export module implemented in `mmcv` and `mmengine`
+    if parent not in set(OFFICIAL_MODULES) - {'mmcv', 'mmengine'}:
 
         with open(file_path, encoding='utf-8') as f:
             top_ast_tree = ast.parse(f.read())
 
         # deal with relative import
-        ModelNodeTransformer(module).visit(top_ast_tree)
-
-        # add a patch to deal with that some downstream repos rename the Registry  # noqa: E501
-        # for example:
-        #   1. BACKBONES = MODELS
-        #   2. use ``build_backbone`` but not ``MODELS.build()``
-        PatchTransformer().visit(top_ast_tree)
+        ImportResolverTransformer(module).visit(top_ast_tree)
 
         # NOTE: ``MODELS.build()`` means to flatten model module
         if self.name == 'model':
 
             # record all the class needed to be flattened
-            need_to_be_flattened_class_name = []
+            need_to_be_flattened_class_names = []
             for node in top_ast_tree.body:
                 if isinstance(node, ast.ClassDef):
-                    need_to_be_flattened_class_name.append(node.name)
+                    need_to_be_flattened_class_names.append(node.name)
 
             imported_module = importlib.import_module(obj_cls.__module__)
-            for cls_name in need_to_be_flattened_class_name:
+            for cls_name in need_to_be_flattened_class_names:
 
                 # record the exported module for postprocessing the importfrom path  # noqa: E501
-                self.module_path_dict[cls_name] = 'pack.' + module_child_path
+                self._module_path_dict[cls_name] = new_module
 
                 cls = getattr(imported_module, cls_name)
 
-                if_need_flatten_flag = False
                 for super_cls in cls.__bases__:
 
                     # the class only will be flattened when:
@@ -382,31 +376,28 @@ def _export_module(self, obj_cls: type, pack_module_dir, obj_type: str):
                     #   2. and super class is not base class
                     #   3. and super class is not torch module
                     if super_cls.__name__\
-                        not in need_to_be_flattened_class_name \
+                        not in need_to_be_flattened_class_names \
                         and (super_cls not in [BaseModule,
                                                BaseModel,
                                                BaseDataPreprocessor,
                                                ImgDataPreprocessor]) \
                             and 'torch' not in super_cls.__module__:  # noqa: E501
 
-                        if_need_flatten_flag = True
+                        print(f'need_flatten: {cls_name} super {super_cls}')
+                        flatten_module(top_ast_tree, cls)
                         break
-
-                if if_need_flatten_flag:
-                    print(f'need_flatten: {cls_name} super {super_cls}')
-                    flatten_module(top_ast_tree, cls)
-
             postprocess_super(top_ast_tree)
 
+
         else:
-            self.module_path_dict[
-                obj_cls.__name__] = 'pack.' + module_child_path
+            self._module_path_dict[
+                obj_cls.__name__] = new_module
 
         # add ``register_module(force=True)`` to cover the registered modules  # noqa: E501
         RegisterModuleTransformer().visit(top_ast_tree)
 
         # unparse ast tree and save reformat code
-        new_file_path = module_child_path.replace('.', '/') + '.py'
+        new_file_path = new_module.strip('pack.').replace('.', '/') + '.py'
         new_file_path = osp.join(pack_module_dir, new_file_path)
         new_dir = osp.dirname(new_file_path)
         mkdir_or_exist(new_dir)
@@ -414,16 +405,18 @@ def _export_module(self, obj_cls: type, pack_module_dir, obj_type: str):
         with open(new_file_path, mode='w') as f:
             f.write(format_code(ast.unparse(top_ast_tree)))
 
-    # deal with torch module
+    # Downstream repo could register torch module into Registry, such as
+    # registering `torch.nn.Linear` into `MODELS`. We need to reserve these
+    # codes in the exported module.
     elif 'torch' in module.split('.')[0]:
 
         # get the root registry, because it can get all the modules
         # had been registered.
-        temp_registry = self if self.parent is None else self.parent
-        if (obj_type not in self.extra_nodule_set) and (
-                temp_registry.init_get_func(obj_type) is
+        root_registry = self if self.parent is None else self.parent
+        if (obj_type not in self._extra_module_set) and (
+                root_registry.init_get_func(obj_type) is
                 None):  # TODO 这里不应该是 obj_cls.name因为注册名字可能不一样
-            self.extra_nodule_set.add(obj_type)
+            self._extra_module_set.add(obj_type)
             with open(osp.join(pack_module_dir, 'registry.py'), 'a') as f:
 
                 # TODO: the downstream repo registries' name maybe
@@ -520,7 +513,7 @@ def flatten_module(top_ast_tree: ast.Module, obj_cls: type):
     for cls in obj_cls.mro():
         if cls in [
                 BaseModule, BaseModel, BaseDataPreprocessor,
-                ImgDataPreprocessor
+                ImgDataPreprocessor, obj_cls
         ] or 'torch' in cls.__module__:
             break
         inheritance_chain.append(cls)
@@ -532,14 +525,13 @@ def flatten_module(top_ast_tree: ast.Module, obj_cls: type):
         = init_prepare(top_ast_tree, obj_cls.__name__)
 
     # iteratively deal with the super class
-    for cls in inheritance_chain[1:]:
+    for cls in inheritance_chain:
 
         modul_pth = inspect.getfile(cls)
         with open(modul_pth) as f:
             super_ast_tree = ast.parse(f.read())
 
-        ModelNodeTransformer(cls.__module__).visit(super_ast_tree)
-        PatchTransformer().visit(super_ast_tree)
+        ImportResolverTransformer(cls.__module__).visit(super_ast_tree)
 
         # collect the difference between ``top_ast_tree`` and ``super_ast_tree``  # noqa: E501
         used_module_dict_super, extra_import_list_super, \
@@ -592,7 +584,7 @@ class RegisterModuleTransformer(ast.NodeTransformer):
         return node
 
 
-class ModelNodeTransformer(ast.NodeTransformer):
+class ImportResolverTransformer(ast.NodeTransformer):
     """Deal with the relative import problem.
 
     Args:
@@ -610,76 +602,59 @@ class ModelNodeTransformer(ast.NodeTransformer):
         self.import_prefix = import_prefix
 
     def visit_ImportFrom(self, node):
+        matched = self._match_alias_registry(node)
+        if matched is not None:
+            # In an ideal scenario, the `ImportResolverTransformer` would modify
+            # the import sources of all `Registry` from downstream algorithm
+            # libraries (`mmdet`) to `pack`, for example, convert
+            # `from mmdet.models import DETECTORS` to
+            # `from pack.models import DETECTORS`.
 
-        # HARD CODE: when the path is '.'
-        # for example： from . import abc
-        if node.module is None:
-            import_prefix = ('.').join(
-                self.import_prefix.split('.')[:-node.level])
-            node.module = import_prefix
+            # However, some algorithm libraries, such as `mmpose`, provide aliases
+            # for `MODELS`, `TASK_UTILS`, and other registries,
+            # as seen here: https://github.com/open-mmlab/mmpose/blob/537bd8e543ab463fb55120d5caaa1ae22d6aaf06/mmpose/models/builder.py#L13.
+            
+            # For these registries with aliases, we cannot directly import from
+            # `pack.registry` because `pack.registry` is copied from
+            # `mmpose.registry` and does not contain these aliases.
 
+            # Therefore, we gather all registries with aliases under
+            # `mim.utils.mmpack.patch_utils` and hardcode the redirection
+            # of import sources.
+            if matched == 'MODELS':
+                node.module = 'mim.utils.mmpack.patch_utils.patch_model'
+            elif matched == 'TASK_UTILS':
+                node.module = 'mim.utils.mmpack.patch_utils.patch_task'
+            node.level = 0
+            return node
+        
+        if node.level == 0:
+            if 'registry' in node.module \
+                    and not node.module.startswith('mmengine'):
+                node.module = 'pack.registry'
+
+        # deal with relative import
         else:
-            if 'registry' in node.module:
-
-                # HARD CODE: 'DefaultScope' must import from mmengine
-                is_default_scope = False
-                for alias in node.names:
-                    if 'DefaultScope' in alias.name:
-                        is_default_scope = True
-
-                if not is_default_scope:
-                    node.module = 'pack.registry'
-                else:
-                    node.module = 'mmengine.registry'
-
-            # deal with relative import
-            elif node.level != 0:
-                import_prefix = ('.').join(
-                    self.import_prefix.split('.')[:-node.level])
+            import_prefix = '.'.join(
+                self.import_prefix.split('.')[:-node.level])
+            if node.module is not None:
                 node.module = import_prefix + '.' + node.module
-
-            # HARD CODE: I don't remember
-            for alias in node.names:
-                if alias.name in BUILDER_TRANS.keys():
-                    node.module = 'pack.registry'
-                    break
-
-        # all node transfer to absolute import
-        node.level = 0
-
+            else:
+                # from . import xxx
+                node.module = import_prefix
+            node.level = 0
         return node
 
+    # TODO: resolve Import Node
 
-class PatchTransformer(ast.NodeTransformer):
-    """A Patch for dealing with downstream repos rename Registry.
-
-    Add an additional module ``export.patch_utils``, containing the
-    ``build_xxx`` and ``BACKBOND = MODELS`` etc. copied from downstream
-    repos.
-
-    After searching downstream repos, only ``MODELS`` and ``TASK_UTILS``
-    need to be patch.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-
-    def visit_ImportFrom(self, node):
-
+    def _match_alias_registry(self, node) -> Optional[str]:
         match_patch_key = None
         for key, list_value in BUILDER_TRANS.items():
             for alias in node.names:
-                if alias.name in list_value and 'datasets' not in node.module:
+                if alias.name in list_value:
                     match_patch_key = key
                     break
 
             if match_patch_key is not None:
                 break
-
-        if match_patch_key is not None:
-            if match_patch_key == 'MODELS':
-                node.module = 'mim.utils.mmpack.patch_utils.patch_model'
-            elif match_patch_key == 'TASK_UTILS':
-                node.module = 'mim.utils.mmpack.patch_utils.patch_task'
-
-        return node
+        return match_patch_key

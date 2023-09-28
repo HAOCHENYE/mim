@@ -576,55 +576,54 @@ def flatten_model(super_ast_tree: ast.Module, class_dict_top: dict,
             # correct level, it will be turn to use the root super
             # class' method.
             super_func = []
-            for top_cls_sub_node in ast.walk(top_cls_node):
+            for sub_mode in ast.walk(top_cls_node):
 
-                if isinstance(top_cls_sub_node, ast.FunctionDef):
+                if sub_mode.value.func.id == 'super' \
+                        and isinstance(sub_mode, ast.Attribute) \
+                        and hasattr(sub_mode, 'value') \
+                        and isinstance(sub_mode.value, ast.Call) \
+                        and isinstance(sub_mode.value.func, ast.Name):  # noqa: E501
+                    """
+                    Examples: super().__init__()
+                        >>> Expr(
+                        >>>     value=Call(
+                        >>>         func=Attribute(
+                        >>>             value=Call(
+                        >>>                 func=Name(id='super',
+                        ctx=Load()),
+                        >>>                 args=[],
+                        >>>                 keywords=[]),
+                        >>>             attr='__init__',
+                        >>>             ctx=Load()),
+                        >>>         args=[],
+                        >>>         keywords=[]))],
+                    """
+                    # Only flatten super syntax:
+                    # 1. super().func_call
+                    # 2. super(top_cls_name, self).func_call
+                    if len(
+                            sub_mode.value.args
+                    ) != 0 and sub_mode.value.args[  # type: ignore[attr-defined]  # noqa: E501
+                            0].id != class_dict_top['level_cls_name']:
+                        continue
 
-                    for top_cls_sub_sub_node in ast.walk(top_cls_sub_node):
-
-                        if isinstance(top_cls_sub_sub_node, ast.Attribute) \
-                            and hasattr(top_cls_sub_sub_node, 'value') \
-                            and isinstance(top_cls_sub_sub_node.value, ast.Call) \
-                            and isinstance(top_cls_sub_sub_node.value.func, ast.Name) \
-                                and top_cls_sub_sub_node.value.func.id == 'super':  # noqa: E501
-                            """
-                            Examples: super().__init__()
-                                >>> Expr(
-                                >>>     value=Call(
-                                >>>         func=Attribute(
-                                >>>             value=Call(
-                                >>>                 func=Name(id='super',
-                                ctx=Load()),
-                                >>>                 args=[],
-                                >>>                 keywords=[]),
-                                >>>             attr='__init__',
-                                >>>             ctx=Load()),
-                                >>>         args=[],
-                                >>>         keywords=[]))],
-                            """
-                            if len(
-                                    top_cls_sub_sub_node.value.args
-                            ) != 0 and top_cls_sub_sub_node.value.args[  # type: ignore[attr-defined]  # noqa: E501
-                                    0].id != class_dict_top['level_cls_name']:
-                                continue
-
-                            # search and justify if the .xxx() function in the
-                            # super node
-                            for super_cls_sub_node in node.body:
-                                if isinstance(
-                                        super_cls_sub_node, ast.FunctionDef
-                                ) and top_cls_sub_sub_node.attr == \
-                                        super_cls_sub_node.name:
-                                    super_func.append(
-                                        top_cls_sub_sub_node.attr)
-                                    top_cls_sub_sub_node.value = \
-                                        top_cls_sub_sub_node.value.func
-                                    top_cls_sub_sub_node.value.id = 'self'
-                                    top_cls_sub_sub_node.value.args = [  # type: ignore[attr-defined]  # noqa: E501
-                                    ]
-                                    top_cls_sub_sub_node.attr = node.name + \
-                                        '_' + top_cls_sub_sub_node.attr
-                                    break
+                    # search and justify if the .xxx() function in the
+                    # super node
+                    for super_cls_sub_node in node.body:
+                        if isinstance(
+                                super_cls_sub_node, ast.FunctionDef
+                        ) and sub_mode.attr == \
+                                super_cls_sub_node.name:
+                            super_func.append(
+                                sub_mode.attr)
+                            sub_mode.value = \
+                                sub_mode.value.func
+                            sub_mode.value.id = 'self'
+                            sub_mode.value.args = [  # type: ignore[attr-defined]  # noqa: E501
+                            ]
+                            sub_mode.attr = node.name + \
+                                '_' + sub_mode.attr
+                            break
 
             # record all the needed ast.ClassDef -> ast.FunctionDef
             #                   and ast.ClassDef -> ast.Assign
@@ -932,12 +931,9 @@ def postprocess_super(ast_tree: ast.Module):
     for node in ast_tree.body:
         if isinstance(node, ast.ClassDef):
             for sub_node in ast.walk(node):
-                if isinstance(sub_node, ast.FunctionDef):
-                    for sub_sub_node in ast.walk(sub_node):
-                        if isinstance(sub_sub_node, ast.Attribute) \
-                            and hasattr(sub_sub_node, 'value') \
-                            and isinstance(sub_sub_node.value, ast.Call) \
-                            and isinstance(sub_sub_node.value.func,
-                                           ast.Name) \
-                                and sub_sub_node.value.func.id == 'super':
-                            sub_sub_node.value.args = []
+                if sub_node.value.func.id == 'super' \
+                        and isinstance(sub_node, ast.Attribute) \
+                        and hasattr(sub_node, 'value') \
+                        and isinstance(sub_node.value, ast.Call) \
+                        and isinstance(sub_node.value.func, ast.Name):
+                    sub_node.value.args = []
